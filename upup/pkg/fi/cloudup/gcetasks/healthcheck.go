@@ -36,6 +36,7 @@ type HealthCheck struct {
 	Name      *string
 	Port      int64
 	Lifecycle fi.Lifecycle
+	Region    string
 }
 
 var _ fi.CompareWithID = &HealthCheck{}
@@ -53,7 +54,13 @@ func (e *HealthCheck) Find(c *fi.CloudupContext) (*HealthCheck, error) {
 	return actual, err
 }
 
-func (e *HealthCheck) URL(cloud gce.GCECloud) string {
+func (e *HealthCheck) URL(cloud gce.GCECloud, region string) string {
+	if region == "" {
+		return fmt.Sprintf("https://www.googleapis.com/compute/v1/projects/%s/global/healthChecks/%s",
+			cloud.Project(),
+			*e.Name)
+	}
+
 	return fmt.Sprintf("https://www.googleapis.com/compute/v1/projects/%s/regions/%s/healthChecks/%s",
 		cloud.Project(),
 		cloud.Region(),
@@ -61,7 +68,7 @@ func (e *HealthCheck) URL(cloud gce.GCECloud) string {
 }
 
 func (e *HealthCheck) find(cloud gce.GCECloud) (*HealthCheck, error) {
-	r, err := cloud.Compute().RegionHealthChecks().Get(cloud.Project(), cloud.Region(), *e.Name)
+	r, err := cloud.Compute().HealthChecks().Get(cloud.Project(), e.Region, *e.Name)
 	if err != nil {
 		if gce.IsNotFound(err) {
 			return nil, nil
@@ -103,14 +110,12 @@ func (_ *HealthCheck) RenderGCE(t *gce.GCEAPITarget, a, e, changes *HealthCheck)
 			Port: e.Port,
 		},
 		Type: "TCP",
-
-		Region: cloud.Region(),
 	}
 
 	if a == nil {
 		klog.V(2).Infof("Creating HealthCheck %q", hc.Name)
 
-		op, err := cloud.Compute().RegionHealthChecks().Insert(cloud.Project(), cloud.Region(), hc)
+		op, err := cloud.Compute().HealthChecks().Insert(cloud.Project(), e.Region, hc)
 		if err != nil {
 			return fmt.Errorf("error creating healthcheck: %v", err)
 		}

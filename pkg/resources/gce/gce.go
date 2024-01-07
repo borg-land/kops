@@ -509,7 +509,11 @@ func deleteForwardingRule(cloud fi.Cloud, r *resources.Resource) error {
 		return err
 	}
 
-	op, err := c.Compute().ForwardingRules().Delete(u.Project, u.Region, u.Name)
+	region := ""
+	if !u.Global {
+		region = u.Region
+	}
+	op, err := c.Compute().ForwardingRules().Delete(u.Project, region, u.Name)
 	if err != nil {
 		if gce.IsNotFound(err) {
 			klog.Infof("ForwardingRule not found, assuming deleted: %q", t.SelfLink)
@@ -826,9 +830,14 @@ func (d *clusterDiscoveryGCE) listAddresses() ([]*resources.Resource, error) {
 
 	addrs, err := c.Compute().Addresses().List(ctx, c.Project(), c.Region())
 	if err != nil {
-		return nil, fmt.Errorf("error listing Addresses: %v", err)
+		return nil, fmt.Errorf("error listing regional Addresses: %v", err)
+	}
+	globalAddrs, err := c.Compute().Addresses().List(ctx, c.Project(), "")
+	if err != nil {
+		return nil, fmt.Errorf("error listing global Addresses: %v", err)
 	}
 
+	addrs = append(addrs, globalAddrs...)
 	for _, a := range addrs {
 		if !d.matchesClusterName(a.Name) {
 			klog.V(8).Infof("Skipping Address with name %q", a.Name)
@@ -859,8 +868,12 @@ func deleteAddress(cloud fi.Cloud, r *resources.Resource) error {
 	if err != nil {
 		return err
 	}
+	region := ""
+	if !u.Global {
+		region = u.Region
+	}
 
-	op, err := c.Compute().Addresses().Delete(u.Project, u.Region, u.Name)
+	op, err := c.Compute().Addresses().Delete(u.Project, region, u.Name)
 	if err != nil {
 		if gce.IsNotFound(err) {
 			klog.Infof("Address not found, assuming deleted: %q", t.SelfLink)
@@ -1077,14 +1090,22 @@ func containsOnlyListedIGMs(svc *compute.BackendService, igms []*resources.Resou
 
 func (d *clusterDiscoveryGCE) listBackendServices() ([]*resources.Resource, error) {
 	c := d.gceCloud
-
-	svcs, err := c.Compute().RegionBackendServices().List(context.Background(), c.Project(), c.Region())
+	// list global backendservices first
+	svcs, err := c.Compute().BackendServices().List(context.Background(), c.Project(), "")
 	if err != nil {
 		if gce.IsNotFound(err) {
-			klog.Infof("backend services not found, assuming none exist in project: %q region: %q", c.Project(), c.Region())
-			return nil, nil
+			// list regional backendservices as well
+			regionalsvcs, err := c.Compute().BackendServices().List(context.Background(), c.Project(), c.Region())
+			if err != nil {
+				if gce.IsNotFound(err) {
+					klog.Infof("backend services not found, assuming none exist in project: %q region: %q", c.Project(), c.Region())
+					return nil, nil
+				}
+			}
+			svcs = append(svcs, regionalsvcs...)
+		} else {
+			return nil, fmt.Errorf("failed to list backend services: %w", err)
 		}
-		return nil, fmt.Errorf("Failed to list backend services: %w", err)
 	}
 	// TODO: cache, for efficiency, if needed.
 	// Find all relevant backend services by finding all the cluster's IGMs, and then
@@ -1102,7 +1123,15 @@ func (d *clusterDiscoveryGCE) listBackendServices() ([]*resources.Resource, erro
 				ID:   svc.Name,
 				Type: typeBackendService,
 				Deleter: func(cloud fi.Cloud, r *resources.Resource) error {
-					op, err := c.Compute().RegionBackendServices().Delete(c.Project(), c.Region(), svc.Name)
+					u, err := gce.ParseGoogleCloudURL(svc.SelfLink)
+					if err != nil {
+						return err
+					}
+					region := ""
+					if !u.Global {
+						region = u.Region
+					}
+					op, err := c.Compute().BackendServices().Delete(c.Project(), region, svc.Name)
 					if err != nil {
 						return err
 					}
@@ -1137,12 +1166,20 @@ func (d *clusterDiscoveryGCE) listHealthchecks() ([]*resources.Resource, error) 
 	}
 	var hcResources []*resources.Resource
 	for hc := range hcs {
+		u, err := gce.ParseGoogleCloudURL(hc)
+		if err != nil {
+			return nil, err
+		}
+		region := ""
+		if !u.Global {
+			region = u.Region
+		}
 		hcResources = append(hcResources, &resources.Resource{
-			Name: gce.LastComponent(hc),
-			ID:   gce.LastComponent(hc),
+			Name: u.Name,
+			ID:   u.Name,
 			Type: typeHealthcheck,
 			Deleter: func(cloud fi.Cloud, r *resources.Resource) error {
-				op, err := c.Compute().RegionHealthChecks().Delete(c.Project(), c.Region(), gce.LastComponent(hc))
+				op, err := c.Compute().HealthChecks().Delete(u.Project, region, u.Name)
 				if err != nil {
 					return err
 				}
